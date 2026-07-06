@@ -1,10 +1,7 @@
-streamlit>=1.36
-pandas>=2.0
-numpy>=1.24
-requests>=2.31
-beautifulsoup4>=4.12
+streamlit>=1.35.0
+pandas>=2.0.0
+requests>=2.31.0
+beautifulsoup4>=4.12.0
 yfinance>=0.2.40
-plotly>=5.22
+supabase>=2.5.0
 streamlit-autorefresh>=1.0.1
-supabase>=2.6.0
-python-dateutil>=2.9

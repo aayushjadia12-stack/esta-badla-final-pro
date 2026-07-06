@@ -1,29 +1,25 @@
-# ESTA Badla Final Pro
+# ESTA Badla Signal Pro
 
-Mobile-first paper-trading dashboard for MCX/COMEX/DGCX badla/spread learning.
+Mobile-first paper badla trading terminal for MCX vs international commodity spreads.
 
 ## Run locally
-
-```bat
-cd %USERPROFILE%\Downloads\esta_badla_final_pro
+```bash
 python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## Streamlit Cloud
-Upload these files to a GitHub repo:
+## Streamlit Cloud secrets
+Add these in Streamlit Cloud > App > Settings > Secrets:
 
-- `app.py`
-- `requirements.txt`
-- `README.md`
+```toml
+SUPABASE_URL="https://YOUR_PROJECT.supabase.co"
+SUPABASE_KEY="YOUR_ANON_PUBLIC_KEY"
+```
 
-Deploy with **Main file path: `app.py`**.
-
-## Supabase persistence (recommended)
-
-Create a free Supabase project, open SQL Editor, and run this SQL:
+## Supabase SQL setup
+Run this in Supabase SQL Editor. If the tables already exist, it is safe to run again.
 
 ```sql
 create table if not exists cash_ledger (
@@ -83,11 +79,14 @@ create table if not exists rate_history (
 );
 ```
 
-Then in Streamlit Cloud, set Secrets:
+## Main menus
+- Dashboard
+- Badla Scanner
+- Open Trade
+- Manual Ticket
+- Past Price Simulator
+- Trade Management
+- History
+- Settings
 
-```toml
-SUPABASE_URL="https://YOUR_PROJECT.supabase.co"
-SUPABASE_KEY="YOUR_ANON_KEY"
-```
-
-Local CSV mode is used automatically if Supabase secrets are missing.
+This app is for paper trading and learning only. Public/free data can be delayed or stale. Before live execution, use broker feeds for MCX, COMEX and DGCX.
