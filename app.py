@@ -188,38 +188,122 @@ def fetch_usdinr() -> Tuple[Optional[float], str]:
     return None, src
 
 @st.cache_data(ttl=30, show_spinner=False)
-def fetch_mcx_from_public(commodity: str) -> Tuple[Optional[float], str]:
-    # Public pages are not official APIs. This is demo/fallback only.
-    urls = []
-    if commodity == "Silver":
-        urls = ["https://groww.in/commodities/futures/mcx_silver", "https://economictimes.indiatimes.com/commoditysummary/symbol-SILVER.cms"]
-    elif commodity == "Gold":
-        urls = ["https://groww.in/commodities/futures/mcx_gold", "https://economictimes.indiatimes.com/commoditysummary/symbol-GOLD.cms"]
-    elif commodity == "Copper":
-        urls = ["https://groww.in/commodities/futures/mcx_copper"]
-    elif commodity == "Zinc":
-        urls = ["https://groww.in/commodities/futures/mcx_zinc"]
-    elif commodity == "Aluminium":
-        urls = ["https://groww.in/commodities/futures/mcx_aluminium"]
-    headers = {"User-Agent":"Mozilla/5.0"}
-    for u in urls:
+def fetch_mcx_sources(commodity: str) -> List[Dict[str, Any]]:
+    """Fetch MCX prices from multiple public/demo pages.
+
+    Important: this does NOT hard-reject values using fixed price ranges. It returns
+    every extracted source value and later marks values as Good / Suspicious by
+    comparing sources with each other. Manual override is always available.
+    """
+    url_map = {
+        "Silver": {
+            "Moneycontrol": "https://www.moneycontrol.com/commodity/mcx-silver-price/",
+            "Groww": "https://groww.in/commodities/futures/mcx_silver",
+            "Economic Times": "https://economictimes.indiatimes.com/commoditysummary/symbol-SILVER.cms",
+        },
+        "Gold": {
+            "Moneycontrol": "https://www.moneycontrol.com/commodity/mcx-gold-price/",
+            "Groww": "https://groww.in/commodities/futures/mcx_gold",
+            "Economic Times": "https://economictimes.indiatimes.com/commoditysummary/symbol-GOLD.cms",
+        },
+        "Copper": {
+            "Moneycontrol": "https://www.moneycontrol.com/commodity/mcx-copper-price/",
+            "Groww": "https://groww.in/commodities/futures/mcx_copper",
+        },
+        "Zinc": {
+            "Moneycontrol": "https://www.moneycontrol.com/commodity/mcx-zinc-price/",
+            "Groww": "https://groww.in/commodities/futures/mcx_zinc",
+        },
+        "Aluminium": {
+            "Moneycontrol": "https://www.moneycontrol.com/commodity/mcx-aluminium-price/",
+            "Groww": "https://groww.in/commodities/futures/mcx_aluminium",
+        },
+    }
+    headers = {"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    out = []
+
+    def extract_price(text: str, commodity: str) -> Tuple[Optional[float], str]:
+        # 1) Prefer explicit labels/JSON fields if present.
+        patterns = [
+            r'"(?:lastPrice|last_price|ltp|last|currentPrice|price)"\s*:\s*"?([0-9,]+(?:\.[0-9]+)?)"?',
+            r'(?:Last Price|LTP|Last Traded Price|Current Price|Price)\s*[:\-]?\s*₹?\s*([0-9,]+(?:\.[0-9]+)?)',
+            r'₹\s*([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]+)?)',
+        ]
+        for pat in patterns:
+            m = re.search(pat, text, flags=re.I)
+            if m:
+                return to_float(m.group(1)), "explicit pattern"
+
+        # 2) Fallback: collect many numbers and choose a rate-like candidate.
+        nums = re.findall(r'₹?\s*([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]+)?|[0-9]{3,9}(?:\.[0-9]+)?)', text)
+        vals = []
+        for n in nums[:500]:
+            v = to_float(n)
+            if v is None or v <= 0:
+                continue
+            # No hard accept/reject range. These are only extraction heuristics to avoid dates/percentages.
+            if commodity in ["Copper", "Zinc", "Aluminium"]:
+                if 20 <= v <= 5000:
+                    vals.append(v)
+            else:
+                if v >= 1000:
+                    vals.append(v)
+        if not vals:
+            return None, "no numeric candidate"
+        # Use the median-like candidate from first few candidates to avoid taking 52-week high/low if possible.
+        first = vals[:20]
+        return float(pd.Series(first).median()), "numeric fallback median"
+
+    for src, url in url_map.get(commodity, {}).items():
         try:
-            r = requests.get(u, headers=headers, timeout=7)
-            text = r.text
-            # Try common patterns around rupee rates
-            nums = re.findall(r'₹?\s*([0-9]{2,3}(?:,[0-9]{3})+(?:\.[0-9]+)?|[0-9]{4,7}(?:\.[0-9]+)?)', text)
-            candidates = []
-            for n in nums[:200]:
-                v = to_float(n)
-                if not v: continue
-                if commodity in ["Silver"] and 100000 < v < 400000: candidates.append(v)
-                elif commodity in ["Gold"] and 50000 < v < 20000000: candidates.append(v)
-                elif commodity in ["Copper","Zinc","Aluminium"] and 50 < v < 2000: candidates.append(v)
-            if candidates:
-                return float(candidates[0]), ("Groww/ET scrape" if "groww" in u or "economictimes" in u else "Public scrape")
-        except Exception:
-            continue
-    return None, "public MCX fetch failed"
+            r = requests.get(url, headers=headers, timeout=8)
+            val, note = extract_price(r.text, commodity)
+            out.append({"source": src, "price": val, "status": "Fetched" if val else "No price", "note": note, "url": url})
+        except Exception as e:
+            out.append({"source": src, "price": None, "status": "Failed", "note": str(e)[:80], "url": url})
+
+    # Compare sources and mark suspicious values, but do not delete them.
+    vals = [x["price"] for x in out if x.get("price") is not None]
+    if vals:
+        med = float(pd.Series(vals).median())
+        for x in out:
+            if x.get("price") is None:
+                continue
+            diff_pct = abs(x["price"] - med) / abs(med) if med else 0
+            x["median"] = med
+            x["diff_pct"] = diff_pct
+            if len(vals) >= 2 and diff_pct > 0.08:
+                x["status"] = "Suspicious"
+                x["note"] = f"Differs {diff_pct:.1%} from source median. Shown, not blocked."
+            elif len(vals) >= 2:
+                x["status"] = "Good"
+                x["note"] = f"Near source median. {x.get('note','')}"
+            else:
+                x["status"] = "Single source"
+                x["note"] = "Only one public source returned a value."
+    return out
+
+def choose_mcx_rate(sources: List[Dict[str, Any]], preference: str, manual_mcx: Optional[float]) -> Tuple[Optional[float], str]:
+    if preference == "Manual MCX":
+        return manual_mcx, "Manual MCX"
+    valid = [x for x in sources if x.get("price") is not None]
+    if not valid:
+        return None, "No public MCX source"
+    if preference and preference not in ["Auto best source", "Manual MCX"]:
+        for x in valid:
+            if x.get("source") == preference:
+                return float(x["price"]), f"{preference} ({x.get('status')})"
+        return float(valid[0]["price"]), f"{valid[0].get('source')} fallback"
+    # Auto best: choose value closest to median across sources. Suspicious values remain visible but are less likely to be picked.
+    vals = [x["price"] for x in valid]
+    med = float(pd.Series(vals).median())
+    best = min(valid, key=lambda x: abs(x["price"] - med))
+    return float(best["price"]), f"Auto best: {best.get('source')} ({best.get('status')})"
+
+@st.cache_data(ttl=30, show_spinner=False)
+def fetch_mcx_from_public(commodity: str) -> Tuple[Optional[float], str]:
+    sources = fetch_mcx_sources(commodity)
+    return choose_mcx_rate(sources, "Auto best source", None)
 
 @st.cache_data(ttl=30, show_spinner=False)
 def fetch_dgcx() -> Tuple[Optional[float], str]:
@@ -270,15 +354,74 @@ def calc_snapshot(commodity, intl_price, mcx_price, dgcx_quote, manual_usdinr, d
     net = None if gross is None else gross - cost
     return {"usdinr": usdinr, "landed": landed, "gross_spread": gross, "cost_per_kg": cost, "net_spread": net}
 
-def get_rate_inputs(commodity: str) -> Dict[str, Any]:
+def get_rate_inputs(commodity: str, mcx_preference: str = "Auto best source", manual_mcx: Optional[float] = None) -> Dict[str, Any]:
     cfg = COMMODITIES[commodity]
     auto_intl, src_intl = yf_last(cfg.get("symbol")) if cfg.get("symbol") else (None, "manual/global only")
-    auto_mcx, src_mcx = fetch_mcx_from_public(commodity)
+    mcx_sources = fetch_mcx_sources(commodity)
+    auto_mcx, src_mcx = choose_mcx_rate(mcx_sources, mcx_preference, manual_mcx)
     auto_dgcx, src_dgcx = fetch_dgcx()
     auto_usdinr, src_usd = fetch_usdinr()
-    return {"auto_intl":auto_intl,"src_intl":src_intl,"auto_mcx":auto_mcx,"src_mcx":src_mcx,"auto_dgcx":auto_dgcx,"src_dgcx":src_dgcx,"auto_usdinr":auto_usdinr,"src_usd":src_usd}
+    return {"auto_intl":auto_intl,"src_intl":src_intl,"auto_mcx":auto_mcx,"src_mcx":src_mcx,"mcx_sources":mcx_sources,"auto_dgcx":auto_dgcx,"src_dgcx":src_dgcx,"auto_usdinr":auto_usdinr,"src_usd":src_usd}
 
 # ---------- Trade logic ----------
+MARGIN_DEFAULTS = {
+    "Silver": {"comex_pct": 0.18, "mcx_pct": 0.08, "dgcx_pct": 0.025},
+    "Gold": {"comex_pct": 0.06, "mcx_pct": 0.06, "dgcx_pct": 0.025},
+    "Copper": {"comex_pct": 0.08, "mcx_pct": 0.08, "dgcx_pct": 0.025},
+    "Zinc": {"comex_pct": 0.08, "mcx_pct": 0.08, "dgcx_pct": 0.025},
+    "Aluminium": {"comex_pct": 0.08, "mcx_pct": 0.08, "dgcx_pct": 0.025},
+}
+
+def leg_actions(direction: str) -> Tuple[str, str, str]:
+    d = str(direction or "")
+    if "MCX_LOW" in d or "BUY_MCX" in d:
+        return "SELL", "BUY", "BUY"
+    return "BUY", "SELL", "SELL"
+
+def intl_notional_inr(commodity: str, intl_price, lots, usdinr) -> float:
+    cfg = COMMODITIES[commodity]
+    price = to_float(intl_price, 0) or 0
+    lots = to_float(lots, 0) or 0
+    usd = to_float(usdinr, 0) or 0
+    qty = lots * cfg["comex_contract_qty"]  # stored in kg-equivalent for all tracked commodities
+    if cfg["conversion"] == "oz_to_kg":
+        usd_notional = price * qty * 32.1507466
+    elif cfg["conversion"] == "lb_to_kg":
+        usd_notional = price * qty * 2.2046226218
+    elif cfg["conversion"] == "mt_to_kg":
+        usd_notional = price * qty / 1000.0
+    else:
+        usd_notional = price * qty
+    return usd_notional * usd
+
+def estimate_margins(commodity: str, intl_price, mcx_price, dgcx_quote, usdinr, comex_lots, mcx_lots, dgcx_lots, direction="MCX_HIGH") -> Dict[str, Any]:
+    cfg = COMMODITIES[commodity]
+    md = MARGIN_DEFAULTS.get(commodity, MARGIN_DEFAULTS["Silver"])
+    usd = to_float(usdinr, None) or dgcx_to_usdinr(to_float(dgcx_quote, None)) or 0
+    comex_notional = intl_notional_inr(commodity, intl_price, comex_lots, usd)
+    mcx_notional = (to_float(mcx_price, 0) or 0) * (to_float(mcx_lots, 0) or 0) * cfg["mcx_lot_qty"]
+    dgcx_notional = (to_float(dgcx_lots, 0) or 0) * cfg.get("currency_exposure_factor", 2000000)
+    ia, ma, da = leg_actions(direction)
+    out = {
+        "intl_action": ia, "mcx_action": ma, "dgcx_action": da,
+        "comex_notional": abs(comex_notional), "mcx_notional": abs(mcx_notional), "dgcx_notional": abs(dgcx_notional),
+        "comex_margin": abs(comex_notional) * md["comex_pct"],
+        "mcx_margin": abs(mcx_notional) * md["mcx_pct"],
+        "dgcx_margin": abs(dgcx_notional) * md["dgcx_pct"],
+        "comex_pct": md["comex_pct"], "mcx_pct": md["mcx_pct"], "dgcx_pct": md["dgcx_pct"],
+    }
+    out["total_margin"] = out["comex_margin"] + out["mcx_margin"] + out["dgcx_margin"]
+    return out
+
+def margin_card(marg: Dict[str, Any], title: str = "Estimated margin used"):
+    st.markdown(f"**{title}**")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric(f"COMEX/Intl {marg.get('intl_action','')}", fmt_inr(marg.get("comex_margin"),0), f"{marg.get('comex_pct',0)*100:.1f}%")
+    c2.metric(f"MCX {marg.get('mcx_action','')}", fmt_inr(marg.get("mcx_margin"),0), f"{marg.get('mcx_pct',0)*100:.1f}%")
+    c3.metric(f"DGCX {marg.get('dgcx_action','')}", fmt_inr(marg.get("dgcx_margin"),0), f"{marg.get('dgcx_pct',0)*100:.1f}%")
+    c4.metric("Total margin", fmt_inr(marg.get("total_margin"),0))
+    st.caption("Margin is estimated for paper trading only. Broker/exchange SPAN, exposure, currency conversion, calendar spreads and intraday rules can be different.")
+
 def suggested_lots(commodity, comex_lots, intl_price=None, usdinr=None):
     cfg=COMMODITIES[commodity]
     qty = comex_lots * cfg["comex_contract_qty"]
@@ -389,13 +532,18 @@ menu = st.tabs(["Dashboard", "Badla Scanner", "Open Trade", "Manual Ticket", "Pa
 st.sidebar.markdown("---")
 sel_commodity = st.sidebar.selectbox("Selected commodity", list(COMMODITIES.keys()), index=0)
 cfg = COMMODITIES[sel_commodity]
-rate_auto = get_rate_inputs(sel_commodity)
+rate_auto_initial = get_rate_inputs(sel_commodity)
 
-use_manual = st.sidebar.checkbox("Use manual prices for selected commodity", value=False)
-manual_intl = st.sidebar.number_input(f"Manual international ({cfg['intl_unit']})", value=float(rate_auto["auto_intl"] or 0), step=0.01, format="%.4f")
-manual_mcx = st.sidebar.number_input(f"Manual MCX ({cfg['unit']})", value=float(rate_auto["auto_mcx"] or 0), step=1.0, format="%.4f")
-manual_dgcx = st.sidebar.number_input("Manual DGCX DINR", value=float(rate_auto["auto_dgcx"] or 104.80), step=0.01, format="%.4f")
-manual_usdinr = st.sidebar.number_input("Manual USDINR fallback", value=float(rate_auto["auto_usdinr"] or 95.0), step=0.01, format="%.4f")
+use_manual = st.sidebar.checkbox("Use manual prices for ALL selected commodity rates", value=False)
+manual_intl = st.sidebar.number_input(f"Manual international ({cfg['intl_unit']})", value=float(rate_auto_initial["auto_intl"] or 0), step=0.01, format="%.4f")
+manual_mcx = st.sidebar.number_input(f"Manual MCX ({cfg['unit']})", value=float(rate_auto_initial["auto_mcx"] or 0), step=1.0, format="%.4f")
+manual_dgcx = st.sidebar.number_input("Manual DGCX DINR", value=float(rate_auto_initial["auto_dgcx"] or 104.80), step=0.01, format="%.4f")
+manual_usdinr = st.sidebar.number_input("Manual USDINR fallback", value=float(rate_auto_initial["auto_usdinr"] or 95.0), step=0.01, format="%.4f")
+
+mcx_source_options = ["Auto best source", "Manual MCX", "Moneycontrol", "Groww", "Economic Times"]
+mcx_source_choice = st.sidebar.selectbox("MCX rate source", mcx_source_options, index=0, help="No hard price range block. All source prices are shown; suspicious differences are only warned.")
+rate_auto = get_rate_inputs(sel_commodity, mcx_source_choice, manual_mcx)
+
 duty = st.sidebar.number_input("Duty %", value=float(cfg["default_duty"]), step=0.1)
 charges = st.sidebar.number_input(f"Charges buffer ({cfg['unit']})", value=float(cfg["charges"]), step=1.0 if sel_commodity in ["Silver","Gold"] else 0.1)
 slippage = st.sidebar.number_input(f"Slippage buffer ({cfg['unit']})", value=float(cfg["slippage"]), step=1.0 if sel_commodity in ["Silver","Gold"] else 0.1)
@@ -447,8 +595,13 @@ with menu[0]:
     c7.metric("Net badla", fmt_inr(snap.get("net_spread"),2) if sel_commodity in ["Silver","Gold"] else fmt_num(snap.get("net_spread"),2), cfg['unit'])
     sig = zone_and_signal(sel_commodity, snap.get("net_spread"), hist_df)
     st.info(f"Signal: **{sig['signal']}** | Zone: **{sig['zone']}** | Quality: **{sig['score']}/100** | {sig['trade']} | {sig['reason']}")
-    with st.expander("Source health"):
+    with st.expander("Source health / MCX source comparison"):
         st.write(source_summary)
+        src_df = pd.DataFrame(rate_auto.get("mcx_sources", []))
+        if not src_df.empty:
+            show_cols = [c for c in ["source","price","status","note","diff_pct","url"] if c in src_df.columns]
+            st.dataframe(src_df[show_cols], use_container_width=True, hide_index=True)
+        st.caption("No hard price-range filter is used. Suspicious means the source differs strongly from other public sources; you can still select it from MCX rate source.")
 
 # ---------- Scanner ----------
 with menu[1]:
@@ -473,25 +626,31 @@ with menu[1]:
 
 # ---------- Open Trade Auto ----------
 with menu[2]:
-    st.subheader("Open Trade — Auto Hedge Mode")
-    st.caption("Enter international lots; app suggests MCX and DGCX lots. Use Manual Ticket if you want exact lot control.")
+    st.subheader("Open Trade — Live/Selected Rate Ticket")
+    st.caption("Use current selected rates, but control COMEX/International, MCX and DGCX lots yourself. Suggested lots are shown only as guidance.")
     colA,colB=st.columns(2)
     with colA:
         direction = st.radio("Trade direction", ["MCX_HIGH", "MCX_LOW"], format_func=direction_label, horizontal=False)
         comex_lots = st.number_input("International/COMEX lots", min_value=0.0, value=float(cfg["suggested_comex_lots"]), step=1.0)
-        suggested_mcx, suggested_dgcx, matched_qty = suggested_lots(sel_commodity, comex_lots, intl, snap.get("usdinr"))
+        suggested_mcx, suggested_dgcx, suggested_matched = suggested_lots(sel_commodity, comex_lots, intl, snap.get("usdinr"))
+        mcx_lots_live = st.number_input("MCX lots", min_value=0.0, value=float(suggested_mcx), step=1.0, help="You can change this manually. It will not be forced to the suggestion.")
+        dgcx_lots_live = st.number_input("DGCX lots", min_value=0.0, value=float(suggested_dgcx), step=1.0, help="You can change this manually. It will not be forced to the suggestion.")
+        matched_qty = mcx_lots_live * cfg["mcx_lot_qty"]
     with colB:
         st.metric("Suggested MCX lots", suggested_mcx)
         st.metric("Suggested DGCX lots", suggested_dgcx)
-        st.metric("Matched quantity", f"{matched_qty:,.2f} kg")
-    notes = st.text_area("Trade notes", value=f"Auto hedge entry. {source_summary}")
+        st.metric("Your matched quantity", f"{matched_qty:,.2f} kg")
+        st.caption(f"Suggested matched qty: {suggested_matched:,.2f} kg")
+    marg = estimate_margins(sel_commodity, intl, mcx, dgcx, snap.get("usdinr"), comex_lots, mcx_lots_live, dgcx_lots_live, direction)
+    margin_card(marg)
+    notes = st.text_area("Trade notes", value=f"Live/selected rate ticket. MCX source: {rate_auto.get('src_mcx')}. {source_summary}")
     if st.button("Open paper trade using current selected rates", type="primary"):
-        if snap.get("net_spread") is None or not matched_qty:
+        if snap.get("net_spread") is None or matched_qty <= 0:
             st.error("Missing rates or matched quantity. Use manual prices or wait for data.")
         else:
-            row={"trade_id":str(uuid.uuid4()),"opened_at":now_iso(),"closed_at":None,"status":"OPEN","commodity":sel_commodity,"direction":direction,"matched_qty_kg":matched_qty,"comex_lots":comex_lots,"mcx_lots":suggested_mcx,"dgcx_lots":suggested_dgcx,"entry_comex":intl,"entry_mcx":mcx,"entry_dgcx":dgcx,"entry_usdinr":snap.get("usdinr"),"entry_landed":snap.get("landed"),"entry_gross_spread":snap.get("gross_spread"),"entry_cost_per_kg":snap.get("cost_per_kg"),"entry_net_spread":snap.get("net_spread"),"exit_comex":None,"exit_mcx":None,"exit_dgcx":None,"exit_usdinr":None,"exit_landed":None,"exit_gross_spread":None,"exit_cost_per_kg":None,"exit_net_spread":None,"realized_pnl":None,"mae":0,"mfe":0,"notes":notes}
+            row={"trade_id":str(uuid.uuid4()),"opened_at":now_iso(),"closed_at":None,"status":"OPEN","commodity":sel_commodity,"direction":direction,"matched_qty_kg":matched_qty,"comex_lots":comex_lots,"mcx_lots":mcx_lots_live,"dgcx_lots":dgcx_lots_live,"entry_comex":intl,"entry_mcx":mcx,"entry_dgcx":dgcx,"entry_usdinr":snap.get("usdinr"),"entry_landed":snap.get("landed"),"entry_gross_spread":snap.get("gross_spread"),"entry_cost_per_kg":snap.get("cost_per_kg"),"entry_net_spread":snap.get("net_spread"),"exit_comex":None,"exit_mcx":None,"exit_dgcx":None,"exit_usdinr":None,"exit_landed":None,"exit_gross_spread":None,"exit_cost_per_kg":None,"exit_net_spread":None,"realized_pnl":None,"mae":0,"mfe":0,"notes":notes}
             store.insert("paper_trades", row)
-            st.success("Paper trade opened.")
+            st.success("Paper trade opened with your lot sizes.")
             st.rerun()
 
 # ---------- Manual Ticket ----------
@@ -523,6 +682,8 @@ with menu[3]:
     man_snap = calc_snapshot(man_com, man_intl_price or None, man_mcx_price or None, man_dgcx_price or None, man_usd, man_duty, man_charges, 0)
     matched_manual = man_mcx_lots * COMMODITIES[man_com]["mcx_lot_qty"]
     st.markdown(f"**Entry net badla:** {fmt_inr(man_snap.get('net_spread'),2) if man_com in ['Silver','Gold'] else fmt_num(man_snap.get('net_spread'),2)} | **Matched qty:** {matched_manual:,.2f} kg | **USDINR:** {fmt_num(man_snap.get('usdinr'),4)}")
+    manual_marg = estimate_margins(man_com, man_intl_price, man_mcx_price, man_dgcx_price, man_snap.get('usdinr'), man_intl_lots, man_mcx_lots, man_dgcx_lots, man_dir)
+    margin_card(manual_marg)
     man_notes = st.text_area("Manual ticket notes", value=f"Exact manual ticket: {man_intl_action} Intl {man_intl_lots} @ {man_intl_price}, {man_mcx_action} MCX {man_mcx_lots} @ {man_mcx_price}, {man_dgcx_action} DGCX {man_dgcx_lots} @ {man_dgcx_price}")
     if st.button("Open exact manual paper trade", type="primary"):
         if man_snap.get("net_spread") is None or matched_manual <= 0:
@@ -566,6 +727,8 @@ with menu[4]:
     a.metric("Past entry net badla", fmt_inr(p_entry.get("net_spread"),2) if pcom in ["Silver","Gold"] else fmt_num(p_entry.get("net_spread"),2))
     b.metric("Current net badla", fmt_inr(p_current.get("net_spread"),2) if pcom in ["Silver","Gold"] else fmt_num(p_current.get("net_spread"),2))
     c.metric("Profit/Loss if opened then", fmt_inr(sim_pnl,0))
+    past_marg = estimate_margins(pcom, p_intl, p_mcx, p_dgcx, p_entry.get('usdinr'), p_intl_lots, p_mcx_lots, p_dgcx_lots, past_dir)
+    margin_card(past_marg, "Estimated margin if this past trade was opened")
     if st.button("Add this past price as open paper trade"):
         if p_entry.get("net_spread") is None:
             st.error("Past entry prices are incomplete.")
@@ -596,6 +759,8 @@ with menu[5]:
                 c1.metric("Entry net badla", fmt_inr(r.get("entry_net_spread"),2) if com in ["Silver","Gold"] else fmt_num(r.get("entry_net_spread"),2))
                 c2.metric("Current net badla", fmt_inr(cur_snap.get("net_spread"),2) if com in ["Silver","Gold"] else fmt_num(cur_snap.get("net_spread"),2))
                 c3.metric("Open P&L", fmt_inr(pnl,0))
+                trade_marg = estimate_margins(com, cur_intl, cur_mcx, cur_dgcx, cur_snap.get('usdinr'), r.get('comex_lots'), r.get('mcx_lots'), r.get('dgcx_lots'), r.get('direction'))
+                margin_card(trade_marg, "Estimated margin currently used by this paper trade")
                 st.caption(str(r.get("notes")))
                 st.markdown("**What-if exit / manual close**")
                 wc1,wc2,wc3=st.columns(3)
@@ -620,6 +785,9 @@ with menu[5]:
 # ---------- History ----------
 with menu[6]:
     st.subheader("History")
+    if st.button("Refresh all history from storage"):
+        st.cache_data.clear()
+        st.rerun()
     htab1,htab2,htab3=st.tabs(["Trades","Rate history","Cash ledger"])
     with htab1:
         df=store.read("paper_trades", TRADE_COLS)
@@ -653,6 +821,14 @@ with menu[7]:
     if st.button("Add paper money") and add_amt>0:
         store.insert("cash_ledger", {"id":str(uuid.uuid4()),"ts":now_iso(),"type":"DEPOSIT","amount":add_amt,"note":add_note})
         st.success("Paper money added."); st.rerun()
+
+    st.markdown("### Remove paper money")
+    rem_amt=st.number_input("Remove paper money", min_value=0.0, value=0.0, step=10000.0)
+    rem_note=st.text_input("Remove note", value="Paper money removed")
+    if st.button("Remove paper money") and rem_amt>0:
+        store.insert("cash_ledger", {"id":str(uuid.uuid4()),"ts":now_iso(),"type":"WITHDRAWAL","amount":-rem_amt,"note":rem_note})
+        st.success("Paper money removed."); st.rerun()
+
     st.markdown("### Current rules")
     st.write("High badla = MCX expensive → Buy international/COMEX, Sell MCX, Sell DGCX hedge.")
     st.write("Low/negative badla = MCX cheap → Sell international/COMEX, Buy MCX, Buy/reverse DGCX hedge.")

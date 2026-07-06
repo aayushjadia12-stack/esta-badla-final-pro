@@ -1,6 +1,19 @@
-# ESTA Badla Signal Pro
+# ESTA Badla Signal Pro v2
 
 Mobile-first paper badla trading terminal for MCX vs international commodity spreads.
+
+This version adds:
+- Moneycontrol/Groww/ET MCX source comparison
+- No hard price-range blocking; suspicious sources are shown as warnings only
+- Manual MCX source selector and manual override
+- Open Trade screen with manual lot input for COMEX/International, MCX and DGCX
+- Manual exact ticket with exact prices and lots
+- Past-price simulator with exact lots
+- Trade management with what-if exit and manual close
+- Estimated margin used by COMEX, MCX and DGCX legs
+- Add paper money and remove paper money
+- Refresh all history from storage
+- Supabase online saving for months of paper trading
 
 ## Run locally
 ```bash
@@ -9,6 +22,27 @@ venv\Scripts\activate
 pip install -r requirements.txt
 streamlit run app.py
 ```
+
+## Streamlit Cloud update
+Upload/replace these 3 files in your existing GitHub repository:
+
+```text
+app.py
+requirements.txt
+README.md
+```
+
+Do not upload:
+
+```text
+venv
+.streamlit
+secrets.toml
+CSV files
+__pycache__
+```
+
+Your existing Supabase data will remain safe because the database tables are unchanged.
 
 ## Streamlit Cloud secrets
 Add these in Streamlit Cloud > App > Settings > Secrets:
@@ -19,7 +53,7 @@ SUPABASE_KEY="YOUR_ANON_PUBLIC_KEY"
 ```
 
 ## Supabase SQL setup
-Run this in Supabase SQL Editor. If the tables already exist, it is safe to run again.
+Run this in Supabase SQL Editor if you have not created the tables yet. If the tables already exist, it is safe to run again.
 
 ```sql
 create table if not exists cash_ledger (
@@ -89,4 +123,7 @@ create table if not exists rate_history (
 - History
 - Settings
 
-This app is for paper trading and learning only. Public/free data can be delayed or stale. Before live execution, use broker feeds for MCX, COMEX and DGCX.
+## Important notes
+This app is for paper trading and learning only. Public/free data can be delayed, stale or wrong. It shows source comparison and warnings, but it does not guarantee data accuracy. Before live execution, use broker-grade feeds for MCX, COMEX and DGCX.
+
+Margin values are estimated for paper trading only. Real broker margin can differ due to SPAN, exposure margin, currency conversion, calendar spread benefits, exchange rules, and intraday changes.
